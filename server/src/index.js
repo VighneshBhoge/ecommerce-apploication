@@ -1,8 +1,12 @@
 import "dotenv/config";
+import "./config/env.js";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import morgan from "morgan";
+import cookieParser from "cookie-parser";
 import rateLimit from "express-rate-limit";
+
 import authRoutes from "./routes/authRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
 import categoryRoutes from "./routes/categoryRoutes.js";
@@ -18,6 +22,9 @@ import addressRoutes from "./routes/addressRoutes.js";
 const app = express();
 
 app.use(helmet());
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+app.use(cookieParser());
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -30,6 +37,7 @@ app.use(
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:5173",
+    credentials: true,
   })
 );
 
@@ -63,10 +71,29 @@ app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
+// Global Error Handler
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error(err.stack || err);
+
+  if (err.code === "P2002") {
+    return res.status(409).json({ error: "Record already exists" });
+  }
+  if (err.code === "P2025") {
+    return res.status(404).json({ error: "Record not found" });
+  }
+
+  if (err.name === "JsonWebTokenError") {
+    return res.status(401).json({ error: "Invalid token" });
+  }
+  if (err.name === "TokenExpiredError") {
+    return res.status(401).json({ error: "Token expired" });
+  }
+
   res.status(err.status || 500).json({
-    error: err.message || "Internal server error",
+    error:
+      process.env.NODE_ENV === "production"
+        ? "Internal server error"
+        : err.message || "Internal server error",
   });
 });
 

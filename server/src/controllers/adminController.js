@@ -1,6 +1,4 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../lib/prisma.js";
 
 export async function getStats(req, res, next) {
   try {
@@ -35,13 +33,14 @@ export async function createProduct(req, res, next) {
       return res.status(400).json({ error: "Name, price and category are required" });
     }
 
+    const finalImageUrl = req.file?.path || imageUrl || `https://picsum.photos/seed/${encodeURIComponent(name)}/600/400`;
+
     const product = await prisma.product.create({
       data: {
         name,
         description: description || "",
         price: parseInt(price),
-        imageUrl:
-          imageUrl || `https://picsum.photos/seed/${encodeURIComponent(name)}/600/400`,
+        imageUrl: finalImageUrl,
         images: Array.isArray(images) ? images : [],
         brand: brand || null,
         stock: parseInt(stock) || 0,
@@ -66,6 +65,7 @@ export async function updateProduct(req, res, next) {
     }
 
     const { name, description, price, imageUrl, images, brand, stock, categoryId } = req.body;
+    const finalImageUrl = req.file?.path || imageUrl;
 
     const product = await prisma.product.update({
       where: { id: req.params.id },
@@ -73,7 +73,7 @@ export async function updateProduct(req, res, next) {
         ...(name !== undefined && { name }),
         ...(description !== undefined && { description }),
         ...(price !== undefined && { price: parseInt(price) }),
-        ...(imageUrl !== undefined && { imageUrl }),
+        ...(finalImageUrl !== undefined && { imageUrl: finalImageUrl }),
         ...(images !== undefined && { images: Array.isArray(images) ? images : [] }),
         ...(brand !== undefined && { brand: brand || null }),
         ...(stock !== undefined && { stock: parseInt(stock) }),
@@ -116,14 +116,32 @@ export async function deleteProduct(req, res, next) {
 
 export async function getAllOrders(req, res, next) {
   try {
-    const orders = await prisma.order.findMany({
-      include: {
-        user: { select: { name: true, email: true } },
-        items: { include: { product: true } },
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit) || 20);
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        include: {
+          user: { select: { name: true, email: true } },
+          items: { include: { product: true } },
+        },
+      }),
+      prisma.order.count(),
+    ]);
+
+    res.json({
+      orders,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
       },
-      orderBy: { createdAt: "desc" },
     });
-    res.json({ orders });
   } catch (err) {
     next(err);
   }
@@ -138,19 +156,50 @@ export async function updateOrderStatus(req, res, next) {
       return res.status(400).json({ error: "Invalid status" });
     }
 
-    const order = await prisma.order.update({
-      where: { id: req.params.id },
-      data: { status },
-      include: {
-        user: { select: { name: true, email: true } },
-        items: { include: { product: true } },
-      },
+    const order = await prisma.$transaction(async (tx) => {
+      const existing = await tx.order.findUnique({
+        where: { id: req.params.id },
+        include: { items: true },
+      });
+
+      if (!existing) {
+        const error = new Error("Order not found");
+        error.status = 404;
+        throw error;
+      }
+
+      if (existing.status === "DELIVERED" && status === "CANCELLED") {
+        const error = new Error("Cannot cancel a delivered order");
+        error.status = 400;
+        throw error;
+      }
+
+      if (status === "CANCELLED" && existing.status !== "CANCELLED") {
+        for (const item of existing.items) {
+          await tx.product.update({
+            where: { id: item.productId },
+            data: { stock: { increment: item.quantity } },
+          });
+        }
+      }
+
+      return await tx.order.update({
+        where: { id: req.params.id },
+        data: { status },
+        include: {
+          user: { select: { name: true, email: true } },
+          items: { include: { product: true } },
+        },
+      });
     });
 
     res.json({ order });
   } catch (err) {
-    if (err.code === "P2025") {
+    if (err.code === "P2025" || err.status === 404) {
       return res.status(404).json({ error: "Order not found" });
+    }
+    if (err.status === 400) {
+      return res.status(400).json({ error: err.message });
     }
     next(err);
   }
@@ -158,18 +207,36 @@ export async function updateOrderStatus(req, res, next) {
 
 export async function getCustomers(req, res, next) {
   try {
-    const users = await prisma.user.findMany({
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        createdAt: true,
-        _count: { select: { orders: true } },
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit) || 20);
+    const skip = (page - 1) * limit;
+
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          createdAt: true,
+          _count: { select: { orders: true } },
+        },
+      }),
+      prisma.user.count(),
+    ]);
+
+    res.json({
+      users,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
       },
     });
-    res.json({ users });
   } catch (err) {
     next(err);
   }

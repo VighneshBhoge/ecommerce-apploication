@@ -1,9 +1,7 @@
 import Razorpay from "razorpay";
 import crypto from "crypto";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../lib/prisma.js";
 import { finalizeOrder } from "../services/orderService.js";
-
-const prisma = new PrismaClient();
 
 let cachedRazorpay = null;
 

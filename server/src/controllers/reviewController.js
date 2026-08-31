@@ -1,6 +1,22 @@
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../lib/prisma.js";
 
-const prisma = new PrismaClient();
+async function updateProductRatingStats(tx, productId) {
+  const stats = await tx.review.aggregate({
+    where: { productId },
+    _avg: { rating: true },
+    _count: { rating: true },
+  });
+
+  const avgRating = stats._avg.rating ? Math.round(stats._avg.rating * 10) / 10 : 0;
+  const reviewCount = stats._count.rating || 0;
+
+  await tx.product.update({
+    where: { id: productId },
+    data: { avgRating, reviewCount },
+  });
+
+  return { avgRating, reviewCount };
+}
 
 export async function getProductReviews(req, res, next) {
   try {
@@ -14,7 +30,7 @@ export async function getProductReviews(req, res, next) {
     const avg =
       reviews.length === 0
         ? 0
-        : reviews.reduce((s, r) => s + r.rating, 0) / reviews.length;
+        : Math.round((reviews.reduce((s, r) => s + r.rating, 0) / reviews.length) * 10) / 10;
 
     res.json({ reviews, avg, count: reviews.length });
   } catch (err) {
@@ -40,20 +56,21 @@ export async function upsertReview(req, res, next) {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    const review = await prisma.review.upsert({
-      where: { userId_productId: { userId: req.user.id, productId } },
-      update: { rating: parsedRating, comment: comment.trim() },
-      create: {
-        userId: req.user.id,
-        productId,
-        rating: parsedRating,
-        comment: comment.trim(),
-      },
-      include: { user: { select: { id: true, name: true } } },
-    });
+    const review = await prisma.$transaction(async (tx) => {
+      const savedReview = await tx.review.upsert({
+        where: { userId_productId: { userId: req.user.id, productId } },
+        update: { rating: parsedRating, comment: comment.trim() },
+        create: {
+          userId: req.user.id,
+          productId,
+          rating: parsedRating,
+          comment: comment.trim(),
+        },
+        include: { user: { select: { id: true, name: true } } },
+      });
 
-    const isUpdate = await prisma.review.count({
-      where: { userId: req.user.id, productId },
+      await updateProductRatingStats(tx, productId);
+      return savedReview;
     });
 
     res.status(201).json({ review });
@@ -74,7 +91,11 @@ export async function deleteReview(req, res, next) {
       return res.status(404).json({ error: "Review not found" });
     }
 
-    await prisma.review.delete({ where: { id: existing.id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.review.delete({ where: { id: existing.id } });
+      await updateProductRatingStats(tx, productId);
+    });
+
     res.json({ message: "Review deleted" });
   } catch (err) {
     next(err);

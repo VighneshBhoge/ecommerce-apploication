@@ -1,9 +1,14 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "../lib/prisma.js";
+import { getCache, setCache } from "../lib/redis.js";
 
 export async function getProducts(req, res, next) {
   try {
+    const cacheKey = `products:${JSON.stringify(req.query)}`;
+    const cachedData = await getCache(cacheKey);
+    if (cachedData) {
+      return res.json(cachedData);
+    }
+
     const {
       search,
       category,
@@ -42,48 +47,10 @@ export async function getProducts(req, res, next) {
     const limitNum = Math.min(48, Math.max(1, parseInt(limit) || 12));
     const skip = (pageNum - 1) * limitNum;
 
-    if (sort === "rating") {
-      const allProducts = await prisma.product.findMany({
-        where,
-        include: { category: true },
-      });
-
-      const ids = allProducts.map((p) => p.id);
-      const grouped =
-        ids.length === 0
-          ? []
-          : await prisma.review.groupBy({
-              by: ["productId"],
-              where: { productId: { in: ids } },
-              _avg: { rating: true },
-              _count: { rating: true },
-            });
-
-      const ratingMap = new Map(
-        grouped.map((g) => [g.productId, { avg: g._avg.rating || 0, count: g._count.rating }])
-      );
-
-      const enriched = allProducts
-        .map((p) => ({
-          ...p,
-          avgRating: ratingMap.get(p.id)?.avg || 0,
-          reviewCount: ratingMap.get(p.id)?.count || 0,
-        }))
-        .sort((a, b) => b.avgRating - a.avgRating);
-
-      const paginated = enriched.slice(skip, skip + limitNum);
-
-      return res.json({
-        products: paginated,
-        total: enriched.length,
-        page: pageNum,
-        totalPages: Math.ceil(enriched.length / limitNum),
-      });
-    }
-
     let orderBy = { createdAt: "desc" };
     if (sort === "price_asc") orderBy = { price: "asc" };
     else if (sort === "price_desc") orderBy = { price: "desc" };
+    else if (sort === "rating") orderBy = { avgRating: "desc" };
 
     const [products, total] = await Promise.all([
       prisma.product.findMany({
@@ -96,33 +63,16 @@ export async function getProducts(req, res, next) {
       prisma.product.count({ where }),
     ]);
 
-    const ids = products.map((p) => p.id);
-    const grouped =
-      ids.length === 0
-        ? []
-        : await prisma.review.groupBy({
-            by: ["productId"],
-            where: { productId: { in: ids } },
-            _avg: { rating: true },
-            _count: { rating: true },
-          });
-
-    const ratingMap = new Map(
-      grouped.map((g) => [g.productId, { avg: g._avg.rating || 0, count: g._count.rating }])
-    );
-
-    const enriched = products.map((p) => ({
-      ...p,
-      avgRating: ratingMap.get(p.id)?.avg || 0,
-      reviewCount: ratingMap.get(p.id)?.count || 0,
-    }));
-
-    res.json({
-      products: enriched,
+    const responsePayload = {
+      products,
       total,
       page: pageNum,
       totalPages: Math.ceil(total / limitNum),
-    });
+    };
+
+    await setCache(cacheKey, responsePayload, 300);
+
+    res.json(responsePayload);
   } catch (err) {
     next(err);
   }
@@ -171,19 +121,7 @@ export async function getProductById(req, res, next) {
       return res.status(404).json({ error: "Product not found" });
     }
 
-    const agg = await prisma.review.aggregate({
-      where: { productId: product.id },
-      _avg: { rating: true },
-      _count: { rating: true },
-    });
-
-    res.json({
-      product: {
-        ...product,
-        avgRating: agg._avg.rating || 0,
-        reviewCount: agg._count.rating,
-      },
-    });
+    res.json({ product });
   } catch (err) {
     next(err);
   }

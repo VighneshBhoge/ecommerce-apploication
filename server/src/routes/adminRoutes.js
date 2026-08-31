@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
+import { upload } from "../lib/cloudinary.js";
 import {
   getStats,
   createProduct,
@@ -17,8 +18,8 @@ router.use(requireAuth, requireAdmin);
 
 router.get("/stats", getStats);
 
-router.post("/products", createProduct);
-router.put("/products/:id", updateProduct);
+router.post("/products", upload.single("image"), createProduct);
+router.put("/products/:id", upload.single("image"), updateProduct);
 router.delete("/products/:id", deleteProduct);
 
 router.get("/orders", getAllOrders);

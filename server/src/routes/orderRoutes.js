@@ -1,20 +1,37 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../lib/prisma.js";
 
-const prisma = new PrismaClient();
 const router = Router();
 
 router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    const orders = await prisma.order.findMany({
-      where: { userId: req.user.id },
-      include: { items: { include: { product: true } } },
-      orderBy: { createdAt: "desc" },
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit) || 20);
+    const skip = (page - 1) * limit;
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where: { userId: req.user.id },
+        skip,
+        take: limit,
+        include: { items: { include: { product: true } } },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.order.count({ where: { userId: req.user.id } }),
+    ]);
+
+    res.json({
+      orders,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
     });
-    res.json({ orders });
   } catch (err) {
     next(err);
   }
@@ -39,41 +56,48 @@ router.get("/:id", async (req, res, next) => {
 
 router.post("/:id/cancel", async (req, res, next) => {
   try {
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order || order.userId !== req.user.id) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-    if (!["PENDING", "PAID"].includes(order.status)) {
-      return res.status(400).json({ error: `Cannot cancel an order with status ${order.status}` });
-    }
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findUnique({
+        where: { id: req.params.id },
+        include: { items: true },
+      });
 
-    const updated = await prisma.order.update({
-      where: { id: order.id },
-      data: { status: "CANCELLED" },
-      include: { items: { include: { product: true } } },
-    });
+      if (!order || order.userId !== req.user.id) {
+        const err = new Error("Order not found");
+        err.status = 404;
+        throw err;
+      }
 
-    if (order.status === "PAID") {
-      await Promise.all(
-        order.items?.length
-          ? []
-          : updated.items.map((item) =>
-              prisma.product.update({
-                where: { id: item.productId },
-                data: { stock: { increment: item.quantity } },
-              })
-            )
-      );
-      for (const item of updated.items) {
-        await prisma.product.update({
+      if (order.status === "DELIVERED") {
+        const err = new Error("Cannot cancel a delivered order");
+        err.status = 400;
+        throw err;
+      }
+
+      if (!["PENDING", "PAID"].includes(order.status)) {
+        const err = new Error(`Cannot cancel an order with status ${order.status}`);
+        err.status = 400;
+        throw err;
+      }
+
+      for (const item of order.items) {
+        await tx.product.update({
           where: { id: item.productId },
           data: { stock: { increment: item.quantity } },
         });
       }
-    }
 
-    res.json({ order: updated });
+      return await tx.order.update({
+        where: { id: req.params.id },
+        data: { status: "CANCELLED" },
+        include: { items: { include: { product: true } } },
+      });
+    });
+
+    res.json({ order: updatedOrder, message: "Order cancelled and stock restored" });
   } catch (err) {
+    if (err.status === 404) return res.status(404).json({ error: err.message });
+    if (err.status === 400) return res.status(400).json({ error: err.message });
     next(err);
   }
 });
